@@ -221,7 +221,12 @@ pub fn convert_content_nodes_to_latex(nodes: &[ContentNode], ctx: &mut ConvertCo
             ContentNode::Math { segments, block } => {
                 flush_typst_chunk(&mut buffer, ctx);
                 let math_source = render_math_segments_to_typst_source(segments);
-                let math_content = convert_math_source_to_latex(&math_source, &ctx.options, false);
+                let math_content = convert_math_source_to_latex(
+                    &math_source,
+                    &ctx.options,
+                    false,
+                    &mut ctx.warnings,
+                );
                 let math_content = rerender_math_with_row_linebreaks_if_aligned(
                     &math_source,
                     &ctx.options,
@@ -236,10 +241,12 @@ pub fn convert_content_nodes_to_latex(nodes: &[ContentNode], ctx: &mut ConvertCo
     flush_typst_chunk(&mut buffer, ctx);
 }
 
+/// Converts in a context of its own, so its warnings are moved into `warnings`.
 fn convert_math_source_to_latex(
     math_source: &str,
     options: &T2LOptions,
     linebreak_as_row: bool,
+    warnings: &mut Vec<String>,
 ) -> String {
     let wrapped = format!("${}$", math_source);
     let root = typst_syntax::parse(&wrapped);
@@ -250,7 +257,8 @@ fn convert_math_source_to_latex(
         math_ctx.push_env(EnvironmentContext::Align);
     }
     convert_first_math_child(&root, &mut math_ctx);
-    math_ctx.finalize().trim().to_string()
+    warnings.append(&mut math_ctx.warnings);
+    super::context::trim_latex(&math_ctx.finalize()).to_string()
 }
 
 fn rerender_math_with_row_linebreaks_if_aligned(
@@ -259,16 +267,19 @@ fn rerender_math_with_row_linebreaks_if_aligned(
     rendered: String,
 ) -> String {
     if rendered.contains(" \\\n") && has_unescaped_alignment(&rendered) {
-        convert_math_source_to_latex(math_source, options, true)
+        // The first rendering already reported the warnings.
+        convert_math_source_to_latex(math_source, options, true, &mut Vec::new())
     } else {
         rendered
     }
 }
 
+/// Converts in a context of its own, so its warnings are moved into `warnings`.
 fn convert_equation_math_to_latex(
     node: &SyntaxNode,
     options: &T2LOptions,
     linebreak_as_row: bool,
+    warnings: &mut Vec<String>,
 ) -> String {
     let mut math_ctx = ConvertContext::new();
     math_ctx.options = options.clone();
@@ -281,7 +292,8 @@ fn convert_equation_math_to_latex(
             convert_math_node(child, &mut math_ctx);
         }
     }
-    math_ctx.finalize().trim().to_string()
+    warnings.append(&mut math_ctx.warnings);
+    super::context::trim_latex(&math_ctx.finalize()).to_string()
 }
 
 fn rerender_equation_with_row_linebreaks_if_aligned(
@@ -290,7 +302,8 @@ fn rerender_equation_with_row_linebreaks_if_aligned(
     rendered: String,
 ) -> String {
     if rendered.contains(" \\\n") && has_unescaped_alignment(&rendered) {
-        convert_equation_math_to_latex(node, options, true)
+        // The first rendering already reported the warnings.
+        convert_equation_math_to_latex(node, options, true, &mut Vec::new())
     } else {
         rendered
     }
@@ -662,7 +675,8 @@ pub fn convert_markup_node(node: &SyntaxNode, ctx: &mut ConvertContext) {
             // Convert math content to a temporary buffer first. Start with
             // inline-fragment linebreaks, then re-render with LaTeX row
             // separators only when the expression is actually aligned.
-            let math_content = convert_equation_math_to_latex(node, &ctx.options, false);
+            let math_content =
+                convert_equation_math_to_latex(node, &ctx.options, false, &mut ctx.warnings);
             let math_content =
                 rerender_equation_with_row_linebreaks_if_aligned(node, &ctx.options, math_content);
 
