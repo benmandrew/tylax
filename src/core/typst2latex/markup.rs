@@ -1698,6 +1698,10 @@ fn parse_typst_align(value: &str) -> Vec<LatexCellAlign> {
         .collect()
 }
 
+/// Upper bound on an integer `columns:` count. The count sizes allocations, so
+/// `columns: 66666666` would otherwise exhaust memory; no real table is this wide.
+const MAX_TABLE_COLUMNS: usize = 1000;
+
 /// Infer number of table columns from Typst `columns:` value.
 /// Supports `columns: 3` and `columns: (auto, auto, auto)`-style specs.
 fn infer_table_columns(value: &str) -> Option<usize> {
@@ -1708,7 +1712,7 @@ fn infer_table_columns(value: &str) -> Option<usize> {
 
     // Try parsing as integer first
     if let Ok(n) = v.parse::<usize>() {
-        return Some(n.max(1));
+        return Some(n.clamp(1, MAX_TABLE_COLUMNS));
     }
 
     // Common Typst form: (auto, auto, auto, ...) or (1fr, 1fr, 1fr)
@@ -2038,7 +2042,7 @@ fn convert_columns_to_latex(children: &[&SyntaxNode], ctx: &mut ConvertContext) 
     let args = FuncArgs::from_func_call(children);
     let num_cols = args
         .named_text("columns")
-        .and_then(|value| infer_table_columns(value).or_else(|| value.parse::<usize>().ok()))
+        .and_then(infer_table_columns)
         .unwrap_or(2);
 
     // Calculate column width

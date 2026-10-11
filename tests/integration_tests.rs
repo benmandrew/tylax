@@ -9807,3 +9807,123 @@ mod l2t_citation_backend {
         );
     }
 }
+
+// ============================================================================
+// Fuzzing regressions (inputs minimised from fuzz/ findings)
+// ============================================================================
+
+mod fuzz_regressions {
+    use super::*;
+
+    /// A `Left1` (`\limits`) or `InfixGreedy` (`\over`) command as a script argument
+    /// panics mitex-parser 0.2.4 when the script node opened after the list start.
+    const MITEX_LIMITS_PANICS: &[&str] = &[
+        r"__\limits",
+        r"^^\limits",
+        r"_^\limits",
+        r"^_\nolimits",
+        r"{__\limits}",
+        r"__ \limits",
+        r"_ _\limits",
+        r"__\over",
+        r"^^\over",
+        r"__\choose",
+        r"\alpha\beta_\over",
+    ];
+
+    #[test]
+    fn script_limits_does_not_panic_in_math() {
+        for input in MITEX_LIMITS_PANICS {
+            latex_to_typst(input);
+        }
+    }
+
+    #[test]
+    fn script_limits_does_not_panic_in_document() {
+        for input in MITEX_LIMITS_PANICS {
+            latex_document_to_typst(&format!(
+                "\\documentclass{{article}}\n\\begin{{document}}\n${input}$\n\\end{{document}}\n"
+            ));
+        }
+    }
+
+    /// A huge `columns:` count sized allocations directly and exhausted memory.
+    #[test]
+    fn huge_table_column_count_is_capped() {
+        let output = typst_to_latex(r"#table(columns: 66666666, [a])");
+        let spec = output
+            .lines()
+            .find(|line| line.starts_with(r"\begin{tabular}"))
+            .expect("table should convert to a tabular");
+        assert_eq!(spec.matches('c').count(), 1000, "column spec: {spec:.80}");
+    }
+
+    #[test]
+    fn huge_grid_column_count_is_capped() {
+        let output = typst_to_latex(r"#grid(columns: 66666666, [a])");
+        assert!(
+            output.len() < 100_000,
+            "grid output is {} bytes",
+            output.len()
+        );
+    }
+
+    /// A script whose base is `MathPrimes` built its operand twice per level, so
+    /// `x^'^'^'…` took exponential time and produced exponential output.
+    #[test]
+    fn nested_prime_scripts_are_linear() {
+        let math = |input: &str| {
+            let output = typst_to_latex(&format!("${input}$"));
+            let start = output.find('$').expect("inline math in output");
+            let end = output.rfind('$').unwrap();
+            output[start..=end].to_string()
+        };
+        assert_eq!(math("x^'^'"), "$x^{{}'^{'}}$");
+        assert_eq!(math("'^2"), "${}'^2$");
+        assert_eq!(math("x'^2"), "$x'^2$");
+
+        let deep = math(&format!("x{}", "^'".repeat(200)));
+        assert!(deep.len() < 2_000, "200 levels gave {} bytes", deep.len());
+    }
+
+    /// Tripwire for the temporary `brace_script_wrapping_commands` workaround: once a
+    /// mitex-parser release stops panicking here, delete the workaround and this test.
+    /// <https://github.com/mitex-rs/mitex/issues/225>
+    #[test]
+    fn mitex_limits_panic_still_upstream() {
+        let parsed = std::panic::catch_unwind(|| {
+            mitex_parser::parse(r"__\limits", mitex_spec_gen::DEFAULT_SPEC.clone())
+        });
+        assert!(
+            parsed.is_err(),
+            "mitex-parser no longer panics on `__\\limits`: remove brace_script_wrapping_commands"
+        );
+    }
+
+    /// The document body, without the `#set` rules every document starts with.
+    fn document_body(input: &str) -> String {
+        latex_document_to_typst(input)
+            .lines()
+            .filter(|line| !line.starts_with("#set "))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string()
+    }
+
+    /// Typst's `<..>` label syntax rejects characters such as `~` and `=`.
+    #[test]
+    fn label_keys_outside_label_syntax() {
+        assert_eq!(document_body(r"\ref{fig:a~b}"), r#"#ref(label("fig-a~b"))"#);
+        assert_eq!(
+            document_body(r"\cite{knuth=1}"),
+            r#"#cite(label("knuth=1"))"#
+        );
+        assert_eq!(document_body(r"\cite{knuth1}"), "#cite(<knuth1>)");
+        assert_eq!(
+            document_body(r"\section{A}\label{s~1}"),
+            r#"= A
+#label("s~1")"#
+        );
+    }
+}
