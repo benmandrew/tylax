@@ -3132,7 +3132,14 @@ mod l2t_document {
 
         // Both phf tables, compared entry for entry.
         for table in ["TYPST_TO_TEX", "DELIMITER_MAP"] {
-            let declared = python_table(&generator, table);
+            let mut declared = python_table(&generator, table);
+            if table == "TYPST_TO_TEX" {
+                // The generator emits CODEX_TYPST_TO_TEX into the same map, and
+                // TYPST_TO_TEX wins where both name a key.
+                for (key, value) in python_table(&generator, "CODEX_TYPST_TO_TEX") {
+                    declared.entry(key).or_insert(value);
+                }
+            }
             let Some(body) = maps
                 .split_once(&format!("pub static {table}: phf::Map"))
                 .and_then(|(_, rest)| rest.split_once("\n};"))
@@ -3146,8 +3153,10 @@ mod l2t_document {
                     continue;
                 };
                 seen += 1;
+                // Python writes `'"'` where Rust needs `"\""`.
+                let value = value.replace("\\\"", "\"");
                 match declared.get(key) {
-                    Some(d) if d == value => {}
+                    Some(d) if *d == value => {}
                     Some(d) => mismatches.push(format!("{table}[{key:?}]: {d:?} vs {value:?}")),
                     None => mismatches.push(format!("{table}[{key:?}] missing from the generator")),
                 }
