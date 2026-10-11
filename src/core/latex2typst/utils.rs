@@ -3,6 +3,7 @@
 //! This module contains pure utility functions that don't depend on converter state.
 
 use std::borrow::Cow;
+use std::fmt::Write;
 
 use mitex_parser::syntax::{SyntaxElement, SyntaxKind, SyntaxNode};
 use mitex_parser::CommandSpec;
@@ -93,7 +94,8 @@ pub fn restore_protected_commands(input: &str) -> String {
 ///
 /// Every conversion path must parse through this, never `mitex_parser::parse` directly.
 pub fn parse_latex(input: &str, spec: CommandSpec) -> SyntaxNode {
-    let input = brace_sqrt_symbol(input);
+    let input = rewrite_primitive_skips(input);
+    let input = brace_sqrt_symbol(&input);
     let input = brace_script_wrapping_commands(&input, &spec);
     mitex_parser::parse(&input, spec)
 }
@@ -126,6 +128,117 @@ fn brace_sqrt_symbol(input: &str) -> Cow<'_, str> {
     }
     out.push_str(rest);
     Cow::Owned(out)
+}
+
+/// TeX primitives whose dimension follows them unbraced.
+const PRIMITIVE_SKIPS: [&str; 4] = ["hskip", "kern", "mkern", "mskip"];
+
+/// Rewrite `\hskip 2pt`, `\kern-1em`, `\mkern 3mu` and `\mskip 4mu plus 2mu`
+/// as `\hspace{…}`.
+///
+/// mitex gives these primitives no argument, so their dimension became loose
+/// letters (`hskip 2 p t`). Stretch and shrink (`plus …`, `minus …`) are
+/// dropped, as `#h` has no glue. A skip with no dimension that parses is left
+/// alone.
+fn rewrite_primitive_skips(input: &str) -> Cow<'_, str> {
+    if !PRIMITIVE_SKIPS.iter().any(|name| input.contains(name)) {
+        return Cow::Borrowed(input);
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(slash) = rest.find('\\') {
+        let (before, from_slash) = rest.split_at(slash);
+        out.push_str(before);
+        let name_len = from_slash[1..]
+            .find(|c: char| !c.is_ascii_alphabetic())
+            .unwrap_or(from_slash.len() - 1);
+        let name = &from_slash[1..1 + name_len];
+        let after = &from_slash[1 + name_len..];
+        if name_len > 0 && PRIMITIVE_SKIPS.contains(&name) {
+            if let Some((dimension, used)) = parse_glue(after) {
+                let _ = write!(out, "\\hspace{{{dimension}}}");
+                rest = &after[used..];
+                continue;
+            }
+        }
+        // A control symbol such as `\\` takes the next character too, so
+        // `\\hskip` stays a line break followed by text.
+        let take = if name_len > 0 {
+            1 + name_len
+        } else {
+            1 + from_slash[1..].chars().next().map_or(0, char::len_utf8)
+        };
+        out.push_str(&from_slash[..take]);
+        rest = &from_slash[take..];
+    }
+    out.push_str(rest);
+    Cow::Owned(out)
+}
+
+/// Parse a TeX dimension, then any `plus`/`minus` glue, at the start of `s`.
+/// Returns the dimension with spaces removed and the bytes consumed.
+fn parse_glue(s: &str) -> Option<(String, usize)> {
+    let (dimension, mut used) = parse_tex_dimension(s, false)?;
+    for keyword in ["plus", "minus"] {
+        let rest = &s[used..];
+        let trimmed = rest.trim_start();
+        if let Some(after) = trimmed.strip_prefix(keyword) {
+            let skipped = rest.len() - after.len();
+            if let Some((_, glue_used)) = parse_tex_dimension(after, true) {
+                used += skipped + glue_used;
+            }
+        }
+    }
+    Some((dimension, used))
+}
+
+/// Parse `[sign] number unit` at the start of `s`, allowing TeX's spaces.
+/// `fil` units (`1fill`) are accepted only for glue.
+fn parse_tex_dimension(s: &str, allow_fil: bool) -> Option<(String, usize)> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let skip_spaces = |i: &mut usize| {
+        while *i < bytes.len() && bytes[*i].is_ascii_whitespace() {
+            *i += 1;
+        }
+    };
+    let mut dimension = String::new();
+    skip_spaces(&mut i);
+    while i < bytes.len() && matches!(bytes[i], b'+' | b'-') {
+        if bytes[i] == b'-' {
+            dimension.push('-');
+        }
+        i += 1;
+        skip_spaces(&mut i);
+    }
+    let number_start = i;
+    while i < bytes.len() && (bytes[i].is_ascii_digit() || matches!(bytes[i], b'.' | b',')) {
+        i += 1;
+    }
+    let number = s[number_start..i].replace(',', ".");
+    if !number.chars().any(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if number.starts_with('.') {
+        dimension.push('0');
+    }
+    dimension.push_str(&number);
+    skip_spaces(&mut i);
+    // A unit is two letters, so `1cmv` is `1cm` then `v`; glue also takes
+    // `fil`, `fill` and `filll`.
+    let rest = &s[i..];
+    let fil = ["filll", "fill", "fil"]
+        .into_iter()
+        .find(|unit| allow_fil && rest.starts_with(unit));
+    let unit = fil.or_else(|| {
+        [
+            "pt", "mm", "cm", "in", "em", "ex", "pc", "bp", "px", "mu", "dd", "cc", "sp",
+        ]
+        .into_iter()
+        .find(|unit| rest.starts_with(unit))
+    })?;
+    dimension.push_str(unit);
+    Some((dimension, i + unit.len()))
 }
 
 /// Brace a command that wraps earlier items (`\limits`, `\over`) when it is the
